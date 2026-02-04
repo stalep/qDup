@@ -1,230 +1,207 @@
 package io.hyperfoil.tools.qdup.stream;
 
-import io.hyperfoil.tools.yaup.AsciiArt;
 import io.hyperfoil.tools.yaup.Sets;
+import org.fusesource.jansi.AnsiColors;
+import org.fusesource.jansi.AnsiMode;
+import org.fusesource.jansi.AnsiType;
+import org.fusesource.jansi.io.AnsiOutputStream;
+import org.fusesource.jansi.io.AnsiProcessor;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.lang.invoke.MethodHandles;
-import java.util.Arrays;
+import java.nio.charset.StandardCharsets;
 import java.util.Set;
-import java.util.stream.Collectors;
 
-/**
- * need to return length of full match or length or partial match
- * just return length of match and then check if last char is m
- */
 public class EscapeFilteredStream extends MultiStream {
-    private final static Logger logger = Logger.getLogger(MethodHandles.lookup().lookupClass());
 
-    private static final int CR = 13;  //\u000d
-    private static final int ESC = 27; //\u001b
-    private static final int NULL = 0; //\u0000
+    private final static Logger logger = Logger.getLogger(MethodHandles.lookup().lookupClass());
+    private final AnsiOutputStream jansiStream;
+
+
+    private static final int CR = 13;
+    private static final int ESC = 27;
     private static final int SHIFT_IN = 15;
     private static final int SHIFT_OUT = 14;
-
-    //https://en.wikipedia.org/wiki/ANSI_escape_code
     private static final Set<Character> CONTROL_SUFFIX = Sets.of(
-            'A',//cursor up
-            'B',//cursor down
-            'C',//cursor forward
-            'D',//cursor back
-            'E',//cursor next line
-            'F',//cursor previous line
-            'G',//cursor horizontal absolute
-            'H',//cursor position
-            'J',//erase display
-            'K',//erase in line
-            'S',//scroll up
-            'T',//scroll down
-            'f',//horozontal,vertical position
-            'm',//graphical rendering
-            'i',//aux port on
-            'n',//device status
-            's',//save cursor position
-            'u', //restore cursor position
-            'h',//seen in git output, switches screen?
-            'l',//same as 'h', seen in git and supposedly changes screens?
-            (char)7, //BEL
-            (char)156 //ST
-            );
+            'A','B','C','D','E','F','G','H','J','K','S','T','f','m','i','n','s','u','h','l',(char)7,(char)156
+    );
 
     private byte[] buffered;
     private int writeIndex = 0;
 
-    public EscapeFilteredStream(){this("");}
-    public EscapeFilteredStream(String name){
+    public EscapeFilteredStream() {
+        this("");
+    }
+
+    public EscapeFilteredStream(String name) {
         super(name);
-        buffered = new byte[20*1024];
+        this.buffered = new byte[20 * 1024];
+
+
+        OutputStream optStream = new OutputStream() {
+            @Override
+            public void write(int b) throws IOException {
+                EscapeFilteredStream.this.superWrite(new byte[]{(byte) b}, 0, 1);
+            }
+            @Override
+            public void write(byte[] b, int off, int len) throws IOException {
+                EscapeFilteredStream.this.superWrite(b, off, len);
+            }
+        };
+
+        // Processor
+        AnsiProcessor strippingProcessor = new AnsiProcessor(optStream) {
+            @Override protected void processSetAttribute(int attribute) {}
+            @Override protected void processSetForegroundColor(int color) {}
+            @Override protected void processSetBackgroundColor(int color) {}
+            @Override protected void processEraseScreen(int eraseOption) {}
+            @Override protected void processEraseLine(int eraseOption) {}
+        };
+
+
+        this.jansiStream = new AnsiOutputStream(
+                optStream,
+                () -> 0,
+                AnsiMode.Strip,
+                strippingProcessor,
+                AnsiType.Native,
+                AnsiColors.TrueColor,
+                StandardCharsets.UTF_8,
+                null, null, false
+        );
     }
-    protected void superWrite(byte b[], int off, int len) throws IOException {
-        if(len < 0 || b.length - off < len){
-            logger.error("superWrite invalid write(b.length="+b.length+", off="+off+", length=" + len+")\n"
-                    +MultiStream.printByteCharacters(b,off,b.length-off)+"\n"+
-                    Arrays.asList(Thread.currentThread().getStackTrace()).stream().map(ste->ste.getClassName()+"."+ste.getMethodName()+"():"+ste.getLineNumber()).collect(Collectors.joining("\n")));
+
+    //
+    @Override
+    public void write(byte[] b, int off, int len) throws IOException {
+        byte[] filtered = new byte[len];
+        int fIdx = 0;
+
+        for (int i = 0; i < len; i++) {
+            byte c = b[off + i];
+
+            if (c == 0) {
+                continue;
+            }
+
+            if (c == SHIFT_IN || c == SHIFT_OUT) {
+                continue;
+            }
+
+
+            if (c == '#' && i + 1 < len && b[off + i + 1] == ESC) {
+
+                continue;
+            }
+
+
+            if (c == ESC && i + 1 < len) {
+                byte next = b[off + i + 1];
+                if (next == '=' || next == '>') {
+                    i++; // Skip ESC
+                    // The loop continues. We effectively skipped 'next' (= or >) by incrementing i.
+                    continue;
+                }
+            }
+
+
+            filtered[fIdx++] = c;
         }
-        super.write(b,off,len);
-    }
 
-    public void flushBuffer() throws IOException {
-        if(writeIndex>0){
-            superWrite(buffered,0,writeIndex);
-            writeIndex=0;
+        if (fIdx > 0) {
+            jansiStream.write(filtered, 0, fIdx);
         }
-    }
-
-    public String getBuffered(){
-        return new String(buffered,0,writeIndex);
+        //jansiStream.write(b, off, len);
     }
 
     @Override
-    public void flush()throws IOException {
-        //flushBuffer();
+    public void write(byte[] b) throws IOException {
+        write(b, 0, b.length);
     }
 
     @Override
-    public void close()throws IOException {
-        flushBuffer();
-        //why do we not call super.close()
-    }
-
-    public void reset(){
-        writeIndex = 0;
+    public void flush() throws IOException {
+        jansiStream.flush();
     }
 
     @Override
-    public void write(byte b[]) throws IOException {
-        write(b,0,b.length);
+    public void close() throws IOException {
+        jansiStream.close();
     }
 
-    // returns the index after the last byte written to destination
-    public static int copyNonNulBytes(byte[] source, int sourceOffset, byte[] destination, int destinationOffset, int len){
+    protected void superWrite(byte[] b, int off, int len) throws IOException {
+        if (len < 0 || b.length - off < len) {
+            // simplified error logging
+            logger.error("superWrite invalid write");
+        }
+        super.write(b, off, len);
+    }
+
+
+    public void reset() { writeIndex = 0; }
+    public String getBuffered() { return new String(buffered, 0, writeIndex); }
+
+    public static int copyNonNulBytes(byte[] source, int sourceOffset, byte[] destination, int destinationOffset, int len) {
         int nonNullIndex = -1;
         int lastWriteIndex = destinationOffset;
-        for(int i=sourceOffset;i<sourceOffset+len;i++){
+        for (int i = sourceOffset; i < sourceOffset + len; i++) {
             if (source[i] == 0) {
-                if(nonNullIndex > -1){ // flush to this point
-                    int writeLength = i-nonNullIndex;
-                    System.arraycopy(source,nonNullIndex,destination,lastWriteIndex,writeLength);
+                if (nonNullIndex > -1) {
+                    int writeLength = i - nonNullIndex;
+                    System.arraycopy(source, nonNullIndex, destination, lastWriteIndex, writeLength);
                     nonNullIndex = -1;
                     lastWriteIndex += writeLength;
                 }
-            }else{
-                if(nonNullIndex == -1){
-                    nonNullIndex = i;
-                }
+            } else {
+                if (nonNullIndex == -1) nonNullIndex = i;
             }
         }
-        if(nonNullIndex > -1){
-            int writeLength = len- (nonNullIndex-sourceOffset);
-            System.arraycopy(source,nonNullIndex,destination,lastWriteIndex,writeLength);
+        if (nonNullIndex > -1) {
+            int writeLength = len - (nonNullIndex - sourceOffset);
+            System.arraycopy(source, nonNullIndex, destination, lastWriteIndex, writeLength);
             lastWriteIndex += writeLength;
         }
         return lastWriteIndex;
     }
 
-    @Override
-    public void write(byte b[], int off, int len) throws IOException {
-        try {
-            int flushIndex = 0;
-            int trailingEscapeIndex = Integer.MAX_VALUE;
-            //expand the buffer if needed
-            if (writeIndex + len > buffered.length) {
-                int needed = writeIndex + len - buffered.length;
-                byte[] newBuffer = new byte[buffered.length + needed];
-                System.arraycopy(buffered, 0, newBuffer, 0, writeIndex);
-                buffered = newBuffer;
-            }
-            //System.arraycopy(b, off, buffered, writeIndex, len);
-            //writeIndex += len;
-            int newWriteIndex = copyNonNulBytes(b,off,buffered,writeIndex,len);
-            writeIndex = newWriteIndex;
-
-            for (int currentIndex = flushIndex; currentIndex < writeIndex; currentIndex++) {
-                boolean filtered = false;
-                do {
-                    filtered = false;
-                    int escapeLength = escapeLength(buffered, currentIndex, writeIndex - currentIndex);
-                    if (escapeLength > 0 && isCompleteEscapeSequence(buffered, currentIndex, escapeLength)) {//is full match, flush to super
-                        filtered = true;
-                    } else if (escapeLength > 0) {//match reached end of buffer
-                        if (trailingEscapeIndex > currentIndex) {
-                            trailingEscapeIndex = currentIndex;
-                        }
-                    }
-                    if (filtered) {
-                        //broken escape sequences are not supported in terminals
-                        //is this true? Don't see that in spec
-                        if (flushIndex < currentIndex) {
-                            superWrite(buffered, flushIndex, currentIndex - flushIndex);
-                        }
-                        currentIndex += escapeLength;
-                        flushIndex = currentIndex;
-                        trailingEscapeIndex = Integer.MAX_VALUE;
-                    }
-                } while (filtered);
-            }
-            if (trailingEscapeIndex < Integer.MAX_VALUE) {//flush from flushIndex to trailingPrefixIndex
-                if (trailingEscapeIndex - flushIndex > 0) {
-                    superWrite(buffered, flushIndex, trailingEscapeIndex - flushIndex);
-                }
-                flushIndex = trailingEscapeIndex;
-            } else {// no matches and no potential matches, flush everything
-                superWrite(buffered, flushIndex, writeIndex - flushIndex);
-                flushIndex = writeIndex - 1;
-                flushIndex = writeIndex;//TODO testing if fixes double write
-
-
-            }
-            //compact the buffer
-            if (flushIndex > 0) {
-                System.arraycopy(buffered, flushIndex, buffered, 0, writeIndex - flushIndex);
-                writeIndex = writeIndex - flushIndex;
-            }
-
-        }catch(Exception e){
-            logger.error(e.getMessage(),e);
-            throw new RuntimeException("b.length="+(b==null?"null":b.length)+" off="+off+" len="+len+" buffered.length="+buffered.length, e);
-        }
-    }
-    //basically just makes sure we have \u001b[...m
-    //checks that the escape sequence is complete and not partially finished
-    public boolean isCompleteEscapeSequence(byte b[], int off, int len){
+    public boolean isCompleteEscapeSequence(byte[] b, int off, int len) {
         boolean rtrn =
                 (len ==1 && (b[off] == CR || b[off] == SHIFT_IN || b[off] == SHIFT_OUT))
-                ||
-                (
-                  len >= 2 && b[off]=='#' && b[off+1] == ESC && isCompleteEscapeSequence(b,off+1,len-1)
-                ) || (
-                    len >= 2 && b[off]=='e' && b[off+1]==8    //miss-configured backspace in zsh
-                ) ||
-                (
-                    b[off]==ESC
-                    &&
-                    (
+                        ||
                         (
-                            ( len>=3 && b[off+1]=='[' && CONTROL_SUFFIX.contains((char)b[off+len-1]))
-                            || (len == 2 && b[off+1]=='=')
-                            || (len == 2 && b[off+1]=='>')
+                                len >= 2 && b[off]=='#' && b[off+1] == ESC && isCompleteEscapeSequence(b,off+1,len-1)
                         ) || (
-                            len>=15
-                            && b[off+ 1]==']'
-                            && b[off+ 2]=='7'
-                            && b[off+ 3]=='7'
-                            && b[off+ 4]=='7'
-                            && b[off+ 5]==';'
-                            && b[off+ 6]=='p'
-                            && b[off+ 7]=='r'
-                            && b[off+ 8]=='e'
-                            && b[off+ 9]=='e'
-                            && b[off+10]=='x'
-                            && b[off+11]=='e'
-                            && b[off+12]=='c'
-                            && b[off+13]==ESC
-                            && b[off+14]=='\\'
-                        )
-                    )
-                );
+                        len >= 2 && b[off]=='e' && b[off+1]==8    //miss-configured backspace in zsh
+                ) ||
+                        (
+                                b[off]==ESC
+                                        &&
+                                        (
+                                                (
+                                                        ( len>=3 && b[off+1]=='[' && CONTROL_SUFFIX.contains((char)b[off+len-1]))
+                                                                || (len == 2 && b[off+1]=='=')
+                                                                || (len == 2 && b[off+1]=='>')
+                                                ) || (
+                                                        len>=15
+                                                                && b[off+ 1]==']'
+                                                                && b[off+ 2]=='7'
+                                                                && b[off+ 3]=='7'
+                                                                && b[off+ 4]=='7'
+                                                                && b[off+ 5]==';'
+                                                                && b[off+ 6]=='p'
+                                                                && b[off+ 7]=='r'
+                                                                && b[off+ 8]=='e'
+                                                                && b[off+ 9]=='e'
+                                                                && b[off+10]=='x'
+                                                                && b[off+11]=='e'
+                                                                && b[off+12]=='c'
+                                                                && b[off+13]==ESC
+                                                                && b[off+14]=='\\'
+                                                )
+                                        )
+                        );
         if(!rtrn && len >=5 && b[off]==ESC && b[off+1]==']' && b[off+2]=='0' && b[off+3]==';'){
             int i=0;
             while(off + i < len && b[off + i] != (char)7){
@@ -234,8 +211,8 @@ public class EscapeFilteredStream extends MultiStream {
         }
         return rtrn;
     }
-    //return length of match up to len or 0 if match failed
-    public int escapeLength(byte b[], int off, int len) {
+
+    public int escapeLength(byte[] b, int off, int len) {
         boolean matching = true;
         int rtrn = 0;
         if (b[off] == 'e'){ // check for miss-configured zsh backspace
