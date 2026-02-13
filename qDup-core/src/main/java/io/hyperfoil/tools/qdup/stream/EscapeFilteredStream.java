@@ -1,13 +1,14 @@
 package io.hyperfoil.tools.qdup.stream;
 
 import io.hyperfoil.tools.yaup.Sets;
-import org.fusesource.jansi.AnsiColors;
-import org.fusesource.jansi.AnsiMode;
-import org.fusesource.jansi.AnsiType;
-import org.fusesource.jansi.io.AnsiOutputStream;
-import org.fusesource.jansi.io.AnsiProcessor;
+import org.jline.jansi.AnsiColors;
+import org.jline.jansi.AnsiMode;
+import org.jline.jansi.AnsiType;
+import org.jline.jansi.io.AnsiOutputStream;
+import org.jline.jansi.io.AnsiProcessor;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.invoke.MethodHandles;
@@ -18,7 +19,8 @@ public class EscapeFilteredStream extends MultiStream {
 
     private final static Logger logger = Logger.getLogger(MethodHandles.lookup().lookupClass());
     private final AnsiOutputStream jansiStream;
-
+    //creating buffer array
+    private final ByteArrayOutputStream barrierBuffer = new ByteArrayOutputStream();
 
     private static final int CR = 13;
     private static final int ESC = 27;
@@ -39,19 +41,21 @@ public class EscapeFilteredStream extends MultiStream {
         super(name);
         this.buffered = new byte[20 * 1024];
 
-
         OutputStream optStream = new OutputStream() {
             @Override
             public void write(int b) throws IOException {
-                EscapeFilteredStream.this.superWrite(new byte[]{(byte) b}, 0, 1);
+                //EscapeFilteredStream.this.superWrite(new byte[]{(byte) b}, 0, 1);
+                barrierBuffer.write(b);
             }
             @Override
             public void write(byte[] b, int off, int len) throws IOException {
-                EscapeFilteredStream.this.superWrite(b, off, len);
+                //EscapeFilteredStream.this.superWrite(b, off, len);
+                barrierBuffer.write(b, off, len);
             }
         };
 
         // Processor
+        // [NOTE] These empty overrides are still valid in JLine 3
         AnsiProcessor strippingProcessor = new AnsiProcessor(optStream) {
             @Override protected void processSetAttribute(int attribute) {}
             @Override protected void processSetForegroundColor(int color) {}
@@ -66,14 +70,16 @@ public class EscapeFilteredStream extends MultiStream {
                 () -> 0,
                 AnsiMode.Strip,
                 strippingProcessor,
-                AnsiType.Native,
+                //AnsiType.Native,
+                AnsiType.Unsupported,
                 AnsiColors.TrueColor,
                 StandardCharsets.UTF_8,
-                null, null, false
+                null,
+                null,
+                false
         );
     }
 
-    //
     @Override
     public void write(byte[] b, int off, int len) throws IOException {
         byte[] filtered = new byte[len];
@@ -90,30 +96,32 @@ public class EscapeFilteredStream extends MultiStream {
                 continue;
             }
 
-
             if (c == '#' && i + 1 < len && b[off + i + 1] == ESC) {
-
                 continue;
             }
-
 
             if (c == ESC && i + 1 < len) {
                 byte next = b[off + i + 1];
                 if (next == '=' || next == '>') {
                     i++; // Skip ESC
-                    // The loop continues. We effectively skipped 'next' (= or >) by incrementing i.
                     continue;
                 }
             }
-
 
             filtered[fIdx++] = c;
         }
 
         if (fIdx > 0) {
+            //jansiStream.write(filtered, 0, fIdx);
             jansiStream.write(filtered, 0, fIdx);
+            jansiStream.flush();
+
+
+            if (barrierBuffer.size() > 0) {
+                superWrite(barrierBuffer.toByteArray(), 0, barrierBuffer.size());
+                barrierBuffer.reset(); // Clear buffer for next time
+            }
         }
-        //jansiStream.write(b, off, len);
     }
 
     @Override
@@ -133,15 +141,14 @@ public class EscapeFilteredStream extends MultiStream {
 
     protected void superWrite(byte[] b, int off, int len) throws IOException {
         if (len < 0 || b.length - off < len) {
-            // simplified error logging
             logger.error("superWrite invalid write");
         }
         super.write(b, off, len);
     }
 
-
     public void reset() { writeIndex = 0; }
     public String getBuffered() { return new String(buffered, 0, writeIndex); }
+
 
     public static int copyNonNulBytes(byte[] source, int sourceOffset, byte[] destination, int destinationOffset, int len) {
         int nonNullIndex = -1;
